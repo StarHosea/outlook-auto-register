@@ -39,7 +39,7 @@ log "当前版本: $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s)"
 
 # ── 2. 重建并重启容器 ─────────────────────────────────────────
 log "docker compose up -d --build ..."
-docker compose -f deploy/docker-compose.prod.yml up -d --build --remove-orphans
+docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
 
 # ── 3. 清理悬空镜像（build 产生的旧层）─────────────────────────
 log "清理悬空镜像 ..."
@@ -50,7 +50,7 @@ log "等待健康检查 ${HEALTH_URL} ..."
 for i in $(seq 1 "$HEALTH_RETRIES"); do
   if curl -fsS --max-time 4 "$HEALTH_URL" >/dev/null 2>&1; then
     log "部署成功（第 ${i} 次探测通过）"
-    docker compose -f deploy/docker-compose.prod.yml ps
+    docker compose -f docker-compose.prod.yml ps
     exit 0
   fi
   # 中途容器就退出了就不用干等了，直接报错

@@ -1,7 +1,11 @@
 # 生产部署编排（服务器端专用，独立文件，不与根目录 docker-compose.yml 叠加）
 #
 # 用法（deploy/deploy.sh 会自动拼装这个命令）：
-#   docker compose -f deploy/docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# 必须放在仓库根目录（而不是 deploy/ 下）：compose 的 project directory 默认
+# 取**第一个 compose 文件所在目录**，相对路径（./.env、./data、./accounts）
+# 都按它解析。放在 deploy/ 里会让这些路径变成 deploy/data、deploy/.env 而找不到。
 #
 # 与开发版 docker-compose.yml 的差异：
 #   1. 端口只绑 127.0.0.1 —— 公网入口统一走宿主机 openresty（outlookreg.shuangdeng.space），
