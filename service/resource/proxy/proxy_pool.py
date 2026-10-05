@@ -624,6 +624,9 @@ def check_entry(entry: dict[str, Any], *, timeout: int = 15, conn: Optional[sqli
         if ip_part and ip_part != "ok":
             exit_ip = ip_part
     checked_at = _now_iso()
+    # 库里存单行版本：控制台把 last_check_msg 塞进 title 属性展示，
+    # 换行会被浏览器折成空格，看起来像一坨。完整多行版留给返回值/日志。
+    msg_db = " ".join(msg.split())
     own_conn = conn is None
     if own_conn:
         conn = _with_db()
@@ -631,7 +634,7 @@ def check_entry(entry: dict[str, Any], *, timeout: int = 15, conn: Optional[sqli
         conn.execute(
             """UPDATE proxies SET status=?, last_check_at=?, last_check_msg=?, exit_ip=?,
                check_count = check_count + 1 WHERE id=?""",
-            (status, checked_at, msg, exit_ip, entry.get("id")),
+            (status, checked_at, msg_db, exit_ip, entry.get("id")),
         )
         if own_conn:
             conn.commit()

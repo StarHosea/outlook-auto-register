@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import re
 import secrets
 import string
 import time
@@ -36,6 +37,8 @@ from service.resource.proxy.proxy_utils import (
     expand_proxy_template,
     expand_proxy_unique,
     has_sid_template,
+    is_proxy_domain_blocked,
+    parse_proxy,
     parse_proxy_pool,
     preflight_proxy,
     probe_exit_stability,
@@ -50,6 +53,33 @@ _TRANSIENT_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
 )
+
+
+def _same_gateway(proxy: Optional[str], others: list[Optional[str]]) -> bool:
+    """remaining 里的代理是否全都和 proxy 走同一个网关（host:port + 供应商前缀）。
+
+    「同一供应商换 sid」不构成换线路——网关策略是按域名下发的，
+    换 sid 只会拿到同一个被封的 CONNECT 行为。
+    """
+    cfg = parse_proxy(proxy)
+    if not cfg or not others:
+        return False
+    vendor = _gateway_signature(cfg)
+    for other in others:
+        oc = parse_proxy(other)
+        if not oc or _gateway_signature(oc) != vendor:
+            return False
+    return True
+
+
+def _gateway_signature(cfg) -> str:
+    """网关身份 = host:port + 去掉 sid 数字后的用户名。
+
+    sid 的形态各家不一（``.12345678`` / ``-sessid-123`` / ``sid_123_time_10``），
+    统一做法是把用户名里的数字段抹掉再比，这样换 sid 不会被误判成换线路。
+    """
+    user = re.sub(r"\d+", "#", cfg.username or "")
+    return f"{cfg.host}:{cfg.port}|{user}"
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -385,6 +415,16 @@ def register_one(
         if not ok:
             logger.error("代理预检失败，跳过（%s/%s）: %s", idx, len(attempt_proxies), info)
             last_err = info
+            # 代理商按域名拒连（CONNECT 直接 502 / 目标域无响应）是网关级策略，
+            # 同一 host:port 换 sid 只是换到同一个网关 → 不必再把剩余重试烧完。
+            # 换线路（不同 host:port / 不同供应商）才可能通，所以按网关去重判断。
+            if is_proxy_domain_blocked(info) and _same_gateway(p, attempt_proxies[idx:]):
+                logger.error(
+                    "同一代理网关对业务域一律拒连，跳过剩余 %s 次重试。"
+                    "请换代理线路或让代理商放行微软认证域（login.microsoftonline.com / *.live.com）。",
+                    len(attempt_proxies) - idx,
+                )
+                break
             continue
         logger.info("代理预检通过（%s/%s）: %s [%s]", idx, len(attempt_proxies), p or "(直连)", info)
         # 出口稳定性：轮换代理会让注册流程的几十条连接落在不同国家，

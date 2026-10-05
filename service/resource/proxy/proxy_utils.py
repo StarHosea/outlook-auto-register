@@ -56,37 +56,108 @@ def proxy_for_requests(proxy: Optional[str]) -> Optional[dict[str, str]]:
 
 
 # 预检探测目标。默认值仅覆盖「能否出网 + 出口 IP」——**不代表对任意目标域名可用**：
-# 代理可只放行 ipinfo/google 而拒绝业务域名（CONNECT 层按 host 授权），
-# 此时 status 仍为 ok，但真实目标一律 403/超时。
+# 代理可只放行 ipinfo/google 而拒绝业务域名（CONNECT 层按 host 授权或上游直接拒连），
+# 此时 status 仍为 ok，但真实目标一律 502/403/超时。
 #
 # 因此额外允许用 OUTLOOK_PROXY_PROBE_URLS 指定真实目标（逗号分隔），
-# 让「预检通过」如实反映代理对该目标是否可用。需要解析出口 IP 的场景
-# 请同时保留默认的 ipinfo 探测。
+# 让「预检通过」如实反映代理对该目标是否可用。它一旦设置就是**完全覆盖**
+# 默认业务清单，所以想继续解析出口 IP，得把 ipinfo 之类的探针一起写进去。
 DEFAULT_PREFLIGHT_PROBES: tuple[tuple[str, str], ...] = (
     ("https://ipinfo.io/ip", "ip_text"),
     ("https://api.myip.com/", "ip_json"),
     ("https://www.google.com/generate_204", "status_only"),
 )
 
+# 业务域默认清单：注册流程必经、且「能出网」证明不了的那几个域名。
+# 选它们是因为响应快（通则 200/302 秒回）——被拒时也能第一时间拿到 502。
+# 刻意不放 account.microsoft.com：它在部分线路上 CONNECT 能成、但 TLS 后
+# 挂到 ReadTimeout（40s），列进来会把每次预检都拖成分钟级。
+DEFAULT_BUSINESS_PROBE_URLS: tuple[str, ...] = (
+    "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize",
+    "https://login.live.com/",
+)
 
-def preflight_probes() -> tuple[tuple[str, str], ...]:
-    """返回预检探测列表：默认探针 + OUTLOOK_PROXY_PROBE_URLS 指定的真实目标。
 
-    额外目标按 ``status_only`` 处理（只看可达性，不解析 IP）。
+def business_probe_urls() -> tuple[str, ...]:
+    """真实业务目标（规范化后去重），作为预检硬门槛。
+
+    这些目标与「能否出网」无关，而是**注册流程真正要打的域名**。代理商可能
+    只放行通用外网、却对微软认证域直接拒绝 CONNECT（resin 网关会回
+    ``502 X-Resin-Error: UPSTREAM_CONNECT_FAILED``），此时默认探针照样全绿。
+
+    默认取 DEFAULT_BUSINESS_PROBE_URLS；``OUTLOOK_PROXY_PROBE_URLS`` 显式设置后
+    **完全覆盖**默认值（想额外加目标就把它整个重写一遍，别只写增量）。
     """
     import os
 
-    probes = list(DEFAULT_PREFLIGHT_PROBES)
-    raw = (os.environ.get("OUTLOOK_PROXY_PROBE_URLS") or "").strip()
-    for part in raw.replace("\n", ",").split(","):
+    raw = os.environ.get("OUTLOOK_PROXY_PROBE_URLS")
+    if raw is None:
+        return DEFAULT_BUSINESS_PROBE_URLS
+    out: list[str] = []
+    for part in (raw or "").replace("\n", ",").split(","):
         u = part.strip()
         if not u or u.startswith("#"):
             continue
         if not u.lower().startswith(("http://", "https://")):
             u = "https://" + u
+        if u not in out:
+            out.append(u)
+    return tuple(out)
+
+
+# preflight_proxy 判定为「代理商按域拒连」时，说明里带这个前缀。
+# 与「节点抖了一下就超时」区分开：后者换 sid 有救，前者换 sid 只会再烧一轮重试。
+PROXY_BLOCK_MARK = "代理拒绝业务域名"
+
+
+def is_proxy_domain_blocked(msg: str) -> bool:
+    """预检失败说明是否属于「代理商按域名拒连」这类换 sid 也救不回来的硬阻断。"""
+    return (msg or "").startswith(PROXY_BLOCK_MARK)
+
+
+def preflight_probes() -> tuple[tuple[str, str], ...]:
+    """返回预检探测列表：默认探针 + OUTLOOK_PROXY_PROBE_URLS 指定的真实目标。
+
+    额外目标按 ``status_only`` 处理（只看可达性，不解析 IP）。
+    注意顺序本身**不代表优先级**——见 preflight_proxy：业务目标是硬门槛，
+    默认探针只在业务目标全部放行后才用于解析出口 IP。
+    """
+    probes = list(DEFAULT_PREFLIGHT_PROBES)
+    for u in business_probe_urls():
         if all(u != p for p, _ in probes):
             probes.append((u, "status_only"))
     return tuple(probes)
+
+
+def _probe_host(url: str) -> str:
+    """探测失败时展示用的短标签（host + path 前缀），避免整条 URL 糊在日志里。"""
+    p = urlparse(url)
+    path = (p.path or "").rstrip("/")
+    return f"{p.hostname or url}{path[:24]}"
+
+
+def _short_proxy_error(exc: Exception) -> str:
+    """把 requests 的连接异常压成一行可读原因。
+
+    代理商网关拒连时 requests 只给一句 ``Tunnel connection failed: 502 Bad Gateway``，
+    不拆开看根本不知道是代理侧问题（而非微软挂了）。
+    """
+    import requests
+
+    if isinstance(exc, requests.exceptions.ProxyError):
+        # requests 抛的是 ProxyError('Unable to connect to proxy', OSError('Tunnel ... 502 Bad Gateway'))
+        # 真正的信息在第 2 个 arg 里，只看 args[0] 会永远得到那句无用的壳。
+        msg = " | ".join(str(a) for a in exc.args) or str(exc)
+        if "Tunnel connection failed" in msg or "502 Bad Gateway" in msg:
+            return "CONNECT 被代理拒（502 Bad Gateway，代理上游连不上该域）"
+        return f"ProxyError: {msg[:100]}"
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return "连接代理超时"
+    if isinstance(exc, (requests.exceptions.ReadTimeout, requests.exceptions.Timeout)):
+        return "代理已建隧道但目标无响应（ReadTimeout）"
+    if isinstance(exc, requests.exceptions.SSLError):
+        return f"SSL 失败（出口被目标域拒）: {str(exc)[:80]}"
+    return f"{type(exc).__name__}: {str(exc)[:100]}"
 
 
 def preflight_proxy(proxy: Optional[str], *, timeout: int = 15) -> tuple[bool, str]:
@@ -100,9 +171,10 @@ def preflight_proxy(proxy: Optional[str], *, timeout: int = 15) -> tuple[bool, s
     不用 google generate_204 作首选：个别网络/代理下浏览器能访问 Google，
     但该 204 探测仍会失败，导致预检误报。
 
-    注意：默认探针只能证明「代理能出网」。若代理按 host 做 CONNECT 授权
-    （放行 ipinfo/google 但拒绝业务域名），本函数仍返回 ok。
-    需要校验真实目标时请设 ``OUTLOOK_PROXY_PROBE_URLS``（见 preflight_probes）。
+    业务目标（``OUTLOOK_PROXY_PROBE_URLS``）是**硬门槛**：任何一条不通就整体判失败。
+    之前把它们追加在默认探针之后、而循环遇到第一个成功就返回，导致 ipinfo 一绿
+    就 short-circuit，业务域即使被代理商按 host 拒连也照样报「预检通过」，
+    白烧掉整轮 REG_PROXY_RETRIES 重试。
     """
     import requests
 
@@ -110,10 +182,33 @@ def preflight_proxy(proxy: Optional[str], *, timeout: int = 15) -> tuple[bool, s
     if not cfg:
         return True, "(直连，无代理)"
     proxies = {"http": cfg.url, "https": cfg.url}
+    business = business_probe_urls()
+
+    # ── 1. 业务目标必须全通 ──────────────────────────────────────
+    # 用 allow_redirects=False：OAuth authorize 正常回 302，硬跟到微软登录页
+    # 只会把「可达」判断混进业务逻辑里。
+    blocked: list[str] = []
+    for url in business:
+        try:
+            r = requests.get(url, proxies=proxies, timeout=timeout, allow_redirects=False)
+            if r.status_code >= 400:
+                blocked.append(f"{_probe_host(url)} → HTTP {r.status_code}")
+        except Exception as exc:  # noqa: BLE001
+            blocked.append(f"{_probe_host(url)} → {_short_proxy_error(exc)}")
+    if blocked:
+        return False, (
+            f"{PROXY_BLOCK_MARK}（不可用于注册）{cfg.host}:{cfg.port} user={cfg.username}\n"
+            + "\n".join(f"    {b}" for b in blocked)
+            + "\n  该代理能出网但 CONNECT 不到目标域名，"
+              "需换线路或让代理商放行微软认证域（login.microsoftonline.com / *.live.com）。"
+        )
+
+    # ── 2. 再解析出口 IP（默认探针）──────────────────────────────
     last = ""
     # (url, mode)  mode: ip_text | ip_json | status_only
-    probes = preflight_probes()
-    for url, mode in probes:
+    for url, mode in preflight_probes():
+        if url in business:
+            continue
         try:
             r = requests.get(url, proxies=proxies, timeout=timeout)
             if r.status_code >= 400:
