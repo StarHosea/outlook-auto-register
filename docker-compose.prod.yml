@@ -33,7 +33,11 @@ services:
       PX_SWIFTSHADER_HEADFUL: "1"
       PX_SWIFTSHADER_TARGET: parent
       PX_PRESS_BACKEND: xdotool
-      OUTLOOK_DB_PATH: /app/data/outlook.db
+      # 显式指向 accounts/outlook.db，而不是沿用镜像里 ENV 带的 /app/data/outlook.db。
+      # dao/outlook_dao.db_path() 在没有环境变量时回退到 <项目根>/accounts/outlook.db，
+      # backup_dir() 也据此定位；镜像那个 ENV 一旦生效，业务库就跟本地跑（非 docker）
+      # 的位置分家了——备份、快照都没法直接互换。这里跟代码默认对齐。
+      OUTLOOK_DB_PATH: /app/accounts/outlook.db
       TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data
