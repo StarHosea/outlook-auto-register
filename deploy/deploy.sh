@@ -17,6 +17,11 @@ die() { printf '[deploy ERROR] %s\n' "$*" >&2; exit 1; }
 
 cd "$APP_DIR" || die "目录不存在: $APP_DIR"
 
+# 首次部署（bootstrap）是以 root clone 的，而流水线是用普通用户 SSH 进来跑的，
+# git 见到 owner 不一致会直接拒绝所有操作（fatal: detected dubious ownership）。
+# 这里显式豁免本目录，避免依赖「谁 clone 的谁跑」这种脆弱假设。
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
+
 # ── 0. 前置检查 ───────────────────────────────────────────────
 command -v docker >/dev/null 2>&1 || die "未安装 docker"
 docker compose version >/dev/null 2>&1 || die "docker compose 不可用（可能是旧版 docker-compose）"
