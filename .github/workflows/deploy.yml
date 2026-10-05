@@ -45,26 +45,27 @@ jobs:
           set -euo pipefail
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          EXPECTED=$(printf '%s\n' \
-  'SHA256:sBnySRgLcEVm8yJtUG+g7n576OH9t/aR7RCv32W50tY' \
-  'SHA256:AGhLOvp9mcAhy77j/JqPu1oShJi3fPDZuiZNUfgqJYQ' | LC_ALL=C sort)
-          keyscan_out=$(ssh-keyscan -t ed25519,rsa "$DEPLOY_HOST" 2>/dev/null)
+          # 只认 ed25519 一种主机密钥。ssh-keyscan -t ed25519,rsa 合并请求时
+          # 并不保证两种都返回（实测会偶发只给一个），若把两种指纹都写进
+          # 校验清单，这种情况下步骤会假失败。单一种则稳定可复现。
+          EXPECTED='SHA256:sBnySRgLcEVm8yJtUG+g7n576OH9t/aR7RCv32W50tY'
+          # `|| true`：ssh-keyscan 网络抖动时返回非零，配合 set -e 会让脚本
+          # 无声退出（连报错都没有）。这里吞掉退出码，改由下面的 -z 判断
+          # 给出可读的失败原因。
+          keyscan_out=$(ssh-keyscan -t ed25519 "$DEPLOY_HOST" 2>/dev/null) || true
           if [ -z "$keyscan_out" ]; then
             echo "::error::扫不到 $DEPLOY_HOST 的主机密钥，服务器不可达"
             exit 1
           fi
-          echo "$keyscan_out" > ~/.ssh/known_hosts
-          # 两边都排序后逐行比：keyscan 的输出顺序不保证，直接比字符串会误报。
-          # 不要写成 printf '%s\n' $EXPECTED（不加引号）——那种写法在 zsh 下
-          # 不会分词，排序结果和 bash 不一致。
-          actual=$(ssh-keygen -lf ~/.ssh/known_hosts | awk '{print $2}' | LC_ALL=C sort)
+          printf '%s\n' "$keyscan_out" > ~/.ssh/known_hosts
+          actual=$(ssh-keygen -lf ~/.ssh/known_hosts | awk '{print $2}')
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::服务器主机密钥与固定值不符，可能被劫持或服务器重装过"
-            echo "期望:"; printf '%s\n' "$EXPECTED"
-            echo "实际:"; printf '%s\n' "$actual"
+            echo "期望: $EXPECTED"
+            echo "实际: $actual"
             exit 1
           fi
-          echo "主机密钥校验通过:"; printf '%s\n' "$actual"
+          echo "主机密钥校验通过: $actual"
 
       - name: Run deploy script on server
         env:
