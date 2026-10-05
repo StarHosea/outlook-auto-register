@@ -13,7 +13,7 @@ from typing import Optional
 import requests
 from dotenv import load_dotenv
 
-from common.msa_api import check_available_signin_name, create_account
+from common.msa_api import SignupApiError, check_available_signin_name, create_account
 from service.registration.bootstrap_service import (
     bootstrap_account_session,
     bootstrap_session,
@@ -53,7 +53,14 @@ _TRANSIENT_ERRORS = (
 
 
 def _is_transient(exc: Exception) -> bool:
-    return isinstance(exc, _TRANSIENT_ERRORS)
+    if isinstance(exc, _TRANSIENT_ERRORS):
+        return True
+    # signup 接口的服务端内部错误（HTTP 200 + body error，code 1181 等）：
+    # 换会话重试有机会，此前抛裸 RuntimeError 导致 REG_PROXY_RETRIES 形同虚设。
+    # 业务性错误（用户名被占等）transient=False，不重试。
+    if isinstance(exc, SignupApiError):
+        return exc.transient
+    return False
 
 
 def _register_attempt(

@@ -18,12 +18,48 @@ from model.entity.register_models import AccountInfo, SignupSession
 
 logger = logging.getLogger(__name__)
 
+# signup 接口「服务端内部错误」类 code——HTTP 200 但 body 带 error，
+# detail/stackTrace 通常为空（风控拒绝的典型形态）。这类是瞬时的：
+# 换会话/换 IP 重试有机会过，不重试等于白放弃已规划好的代理。
+# 真正的业务错误（用户名被占等）不在此列，不应重试。
+SIGNUP_TRANSIENT_CODES = frozenset({"1181", "1182", "1183", "500", "5000", "999"})
+
+
+class SignupApiError(RuntimeError):
+    """signup 接口返回 error 时的异常。``transient`` 供上层判断是否重试。"""
+
+    def __init__(self, msg: str, *, code: str = "", stage: str = "") -> None:
+        super().__init__(msg)
+        self.code = str(code or "")
+        self.stage = stage
+        self.transient = self.code in SIGNUP_TRANSIENT_CODES
+
 
 def _signup_api_url(endpoint: str, ctx: SignupSession) -> str:
     if ctx.signup_query:
         return f"{SIGNUP_API_BASE}/{endpoint}?{ctx.signup_query}"
     qs = urllib.parse.urlencode(ctx.common_query_params())
     return f"{SIGNUP_API_BASE}/{endpoint}?{qs}"
+
+
+def _fmt_signup_error(stage: str, err: Any) -> str:
+    """把 signup 接口的 error 结构整理成可诊断的日志。
+
+    风控类拒绝常返回 ``{code, data:'', stackTrace:'', telemetryContext}``——
+    data/stackTrace 全空时直接打印整个 dict 等于什么都看不到，而
+    telemetryContext 恰恰是微软侧查服务端日志的唯一线索，必须带上。
+    """
+    if not isinstance(err, dict):
+        return f"{stage} 失败: {err!r}"
+    code = err.get("code", "?")
+    # data / message / stackTrace 任一有内容才算「有详细原因」
+    detail = err.get("data") or err.get("message") or err.get("stackTrace") or ""
+    parts = [f"{stage} 失败 code={code}"]
+    parts.append(f"detail={str(detail)[:200]}" if detail else "detail=(空，服务端未给原因)")
+    tel = str(err.get("telemetryContext") or "").strip()
+    if tel:
+        parts.append(f"telemetry={tel}")
+    return " ".join(parts)
 
 
 def check_available_signin_name(
@@ -44,7 +80,12 @@ def check_available_signin_name(
     resp.raise_for_status()
     data = resp.json()
     if "error" in data:
-        raise RuntimeError(f"CheckAvailable 失败: {data['error']}")
+        err = data["error"]
+        raise SignupApiError(
+            _fmt_signup_error("CheckAvailable", err),
+            code=(err.get("code") if isinstance(err, dict) else ""),
+            stage="CheckAvailable",
+        )
     http.update_canary(ctx, data)
     if data.get("telemetryContext"):
         ctx.telemetry_context = data["telemetryContext"]
@@ -79,7 +120,12 @@ def evaluate_experiment_assignments(
     resp.raise_for_status()
     data = resp.json()
     if "error" in data:
-        raise RuntimeError(f"EvaluateExperimentAssignments 失败: {data['error']}")
+        err = data["error"]
+        raise SignupApiError(
+            _fmt_signup_error("EvaluateExperimentAssignments", err),
+            code=(err.get("code") if isinstance(err, dict) else ""),
+            stage="EvaluateExperimentAssignments",
+        )
     new_canary = data.get("apiCanary")
     telemetry = data.get("telemetryContext")
     if not new_canary:
@@ -237,7 +283,12 @@ def create_account(
     resp.raise_for_status()
     data = resp.json()
     if "error" in data:
-        raise RuntimeError(f"CreateAccount 失败: {data['error']}")
+        err = data["error"]
+        raise SignupApiError(
+            _fmt_signup_error("CreateAccount", err),
+            code=(err.get("code") if isinstance(err, dict) else ""),
+            stage="CreateAccount",
+        )
     http.update_canary(ctx, data)
     return data
 

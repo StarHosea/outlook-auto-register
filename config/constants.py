@@ -197,6 +197,10 @@ DEFAULT_UA = (
 DEFAULT_MKT = "EN-US"
 DEFAULT_LC = "1033"
 
+# 全局默认国家。所有默认值统一取这里，避免各处散落 "US"/"SG" 写成两套。
+# 显式传参 / DTO 字段仍优先于本值。
+DEFAULT_COUNTRY = "US"
+
 # country → (mkt, lc)，与代理地区一致，降低批量指纹
 COUNTRY_LOCALE: dict[str, tuple[str, str]] = {
     "US": ("EN-US", "1033"),
@@ -216,7 +220,7 @@ COUNTRY_LOCALE: dict[str, tuple[str, str]] = {
 
 
 def locale_for_country(country: str) -> tuple[str, str]:
-    cc = (country or "US").strip().upper()
+    cc = (country or DEFAULT_COUNTRY).strip().upper()
     return COUNTRY_LOCALE.get(cc, (DEFAULT_MKT, DEFAULT_LC))
 
 
@@ -225,17 +229,6 @@ def signup_url_for_country(country: str) -> str:
     mkt, _lc = locale_for_country(country)
     return f"https://signup.live.com/signup?lic=1&mkt={mkt}"
 
-
-def signup_url_for_country(country: str) -> str:
-    """Microsoft signup URL with explicit ``mkt`` — avoids Uzbek/随机 IP locale。"""
-    mkt, _lc = locale_for_country(country)
-    return f"https://signup.live.com/signup?lic=1&mkt={mkt}"
-
-
-def signup_url_for_country(country: str) -> str:
-    """Microsoft signup URL with explicit ``mkt`` — avoids Uzbek/随机 IP locale。"""
-    mkt, _lc = locale_for_country(country)
-    return f"https://signup.live.com/signup?lic=1&mkt={mkt}"
 
 # Web 注册页国家下拉（ISO2 → 英文名；未在 COUNTRY_LOCALE 的仍可用默认 EN-US locale）
 REGISTRATION_COUNTRY_NAMES: dict[str, str] = {

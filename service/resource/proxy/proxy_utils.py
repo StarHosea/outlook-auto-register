@@ -55,6 +55,40 @@ def proxy_for_requests(proxy: Optional[str]) -> Optional[dict[str, str]]:
     return {"http": cfg.url, "https": cfg.url}
 
 
+# 预检探测目标。默认值仅覆盖「能否出网 + 出口 IP」——**不代表对任意目标域名可用**：
+# 代理可只放行 ipinfo/google 而拒绝业务域名（CONNECT 层按 host 授权），
+# 此时 status 仍为 ok，但真实目标一律 403/超时。
+#
+# 因此额外允许用 OUTLOOK_PROXY_PROBE_URLS 指定真实目标（逗号分隔），
+# 让「预检通过」如实反映代理对该目标是否可用。需要解析出口 IP 的场景
+# 请同时保留默认的 ipinfo 探测。
+DEFAULT_PREFLIGHT_PROBES: tuple[tuple[str, str], ...] = (
+    ("https://ipinfo.io/ip", "ip_text"),
+    ("https://api.myip.com/", "ip_json"),
+    ("https://www.google.com/generate_204", "status_only"),
+)
+
+
+def preflight_probes() -> tuple[tuple[str, str], ...]:
+    """返回预检探测列表：默认探针 + OUTLOOK_PROXY_PROBE_URLS 指定的真实目标。
+
+    额外目标按 ``status_only`` 处理（只看可达性，不解析 IP）。
+    """
+    import os
+
+    probes = list(DEFAULT_PREFLIGHT_PROBES)
+    raw = (os.environ.get("OUTLOOK_PROXY_PROBE_URLS") or "").strip()
+    for part in raw.replace("\n", ",").split(","):
+        u = part.strip()
+        if not u or u.startswith("#"):
+            continue
+        if not u.lower().startswith(("http://", "https://")):
+            u = "https://" + u
+        if all(u != p for p, _ in probes):
+            probes.append((u, "status_only"))
+    return tuple(probes)
+
+
 def preflight_proxy(proxy: Optional[str], *, timeout: int = 15) -> tuple[bool, str]:
     """快速验活：代理能否 HTTPS CONNECT 出网。
 
@@ -65,6 +99,10 @@ def preflight_proxy(proxy: Optional[str], *, timeout: int = 15) -> tuple[bool, s
     探测 URL 优先 ipinfo / myip（可解析出口 IP）。
     不用 google generate_204 作首选：个别网络/代理下浏览器能访问 Google，
     但该 204 探测仍会失败，导致预检误报。
+
+    注意：默认探针只能证明「代理能出网」。若代理按 host 做 CONNECT 授权
+    （放行 ipinfo/google 但拒绝业务域名），本函数仍返回 ok。
+    需要校验真实目标时请设 ``OUTLOOK_PROXY_PROBE_URLS``（见 preflight_probes）。
     """
     import requests
 
@@ -74,11 +112,7 @@ def preflight_proxy(proxy: Optional[str], *, timeout: int = 15) -> tuple[bool, s
     proxies = {"http": cfg.url, "https": cfg.url}
     last = ""
     # (url, mode)  mode: ip_text | ip_json | status_only
-    probes = (
-        ("https://ipinfo.io/ip", "ip_text"),
-        ("https://api.myip.com/", "ip_json"),
-        ("https://www.google.com/generate_204", "status_only"),
-    )
+    probes = preflight_probes()
     for url, mode in probes:
         try:
             r = requests.get(url, proxies=proxies, timeout=timeout)

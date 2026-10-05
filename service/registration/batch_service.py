@@ -21,6 +21,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Callable, Iterator, Optional
 
+from config.constants import DEFAULT_COUNTRY
 from model.entity.register_models import RegisterResult
 from service.resource.proxy.proxy_utils import expand_proxy_unique, has_sid_template
 from service.registration.register_service import register_one, save_account
@@ -93,7 +94,7 @@ def register_batch_iter(
     concurrency: int = 2,
     email_prefix: Optional[str] = None,
     email_domain: str = "@outlook.com",
-    country: str = "SG",
+    country: str = DEFAULT_COUNTRY,
     proxy: Optional[str] = None,
     proxy_plan: Optional[list[Optional[str]]] = None,
     proxy_templates: Optional[list[Optional[str]]] = None,
@@ -130,7 +131,17 @@ def register_batch_iter(
         if len(proxy_plan) < count:
             filler = proxy_plan[-1] if proxy_plan else None
             proxy_plan += [filler] * (count - len(proxy_plan))
-        proxy_unique = any(has_sid_template(p) for p in proxy_plan if p)
+        # proxy_plan 来自代理池，已在 plan_for_batch 内把 {sid} 展开成具体 sid
+        # （见 proxy_pool.resolve_template），因此这里查 "{sid}" 字面量必然落空 → 误报
+        # 「全批共用同一出口 IP」。判定改用两种依据（任一成立即一号一 IP 生效）：
+        #   1) proxy_templates —— 代理池回传的原始模板，含 {sid} 即每号独立会话；
+        #   2) proxy_plan 展开结果互不相同 —— 结果导向，可发现模板写错导致
+        #      同 sid 重复展开的情况。count==1 时退化为仅依据 1，避免误判。
+        if any(has_sid_template(t) for t in (proxy_templates or []) if t):
+            proxy_unique = True
+        else:
+            uniq = {p for p in proxy_plan if p}
+            proxy_unique = len(uniq) > 1 or any(has_sid_template(p) for p in uniq)
     else:
         proxy_plan = _plan_proxies(proxy, count)
         proxy_unique = bool(proxy and has_sid_template(proxy))
@@ -312,7 +323,7 @@ def register_batch(
         res = register_one(
             email_prefix=kwargs.get("email_prefix"),
             email_domain=kwargs.get("email_domain", "@outlook.com"),
-            country=kwargs.get("country", "SG"),
+            country=kwargs.get("country", DEFAULT_COUNTRY),
             proxy=proxy_plan[idx],
             px_mode=kwargs.get("px_mode", "solver"),
             skip_post_login=kwargs.get("skip_post_login", False),

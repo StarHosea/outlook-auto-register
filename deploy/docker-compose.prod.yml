@@ -1,0 +1,54 @@
+# 生产部署编排（服务器端专用，独立文件，不与根目录 docker-compose.yml 叠加）
+#
+# 用法（deploy/deploy.sh 会自动拼装这个命令）：
+#   docker compose -f deploy/docker-compose.prod.yml up -d --build
+#
+# 与开发版 docker-compose.yml 的差异：
+#   1. 端口只绑 127.0.0.1 —— 公网入口统一走宿主机 openresty（outlookreg.shuangdeng.space），
+#      避免容器端口绕过 TLS 直接暴露。
+#   2. 加 healthcheck，便于 deploy.sh 判定「拉起来没有」。
+#   3. 镜像打 :prod 标，与本机 :local 的开发镜像互不覆盖。
+#
+# 注意：data/ 与 accounts/ 是运行期数据（SQLite 库、账号池），必须留在宿主机卷上，
+# 重建镜像时不会被清掉。
+
+services:
+  outlook-register:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: outlook-auto-register:prod
+    container_name: outlook-auto-register
+    ports:
+      - "127.0.0.1:8890:8890"
+    env_file:
+      - .env
+    environment:
+      DISPLAY: ":99"
+      PX_SOLVER: swiftshader
+      PX_SWIFTSHADER_HEADFUL: "1"
+      PX_SWIFTSHADER_TARGET: parent
+      PX_PRESS_BACKEND: xdotool
+      OUTLOOK_DB_PATH: /app/data/outlook.db
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/app/data
+      - ./accounts:/app/accounts
+    restart: unless-stopped
+    # PX solver 跑 headless Chromium，/dev/shm 默认 64MB 会导致渲染崩溃
+    shm_size: "1gb"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8890/api/ping', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
