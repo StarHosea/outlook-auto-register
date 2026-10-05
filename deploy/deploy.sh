@@ -41,9 +41,12 @@ log "当前版本: $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s)"
 log "docker compose up -d --build ..."
 docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
 
-# ── 3. 清理悬空镜像（build 产生的旧层）─────────────────────────
+# ── 3. 清理悬空镜像 ───────────────────────────────────────────
+# 只删 dangling（<none>）镜像，**不能加 -a**。
+# 这台宿主机是共用的，跑了 30+ 个容器/服务，`prune -af` 会连带清掉
+# 「当前没有容器在跑、但别的项目下次部署要复用」的镜像。
 log "清理悬空镜像 ..."
-docker image prune -af --filter "until=168h" >/dev/null 2>&1 || true
+docker image prune -f >/dev/null 2>&1 || true
 
 # ── 4. 健康检查 ───────────────────────────────────────────────
 log "等待健康检查 ${HEALTH_URL} ..."
